@@ -1,11 +1,9 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
-use super::{frame_alloc, is_prot_valid, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
-use crate::config::PAGE_SIZE;
-use crate::task::{add_user_map_area, current_user_token};
 
 bitflags! {
     /// page table entry flags
@@ -18,6 +16,26 @@ bitflags! {
         const G = 1 << 5;
         const A = 1 << 6;
         const D = 1 << 7;
+    }
+}
+impl From<usize> for  PTEFlags {
+    fn from(value: usize) -> Self {
+        let mut pte_flags=PTEFlags::empty();
+        if value & (1 << 0) != 0 {
+            pte_flags |= PTEFlags::R;
+        }
+        if value & (1 << 1) != 0 {
+            pte_flags |= PTEFlags::W;
+        }
+        if value & (1 << 2) != 0 {
+            pte_flags |= PTEFlags::X;
+        }
+        if value & !0b111 != 0 {
+            panic!("other bits must be 0");
+        }
+        pte_flags |= PTEFlags::U;
+        pte_flags |= PTEFlags::V;
+        pte_flags
     }
 }
 
@@ -172,71 +190,4 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
-}
-
-
-
-/// According to the test cases, we should handle page-unaligned start/len like this:
-/// munmap(0x1000, 0x1001) -> [0x1000, 0x3000) unmapped
-pub fn unmap_many_inner(start: usize, len: usize) -> isize {
-    let token = current_user_token();
-    let mut pt: PageTable = PageTable::from_token(token);
-    let mut vpn = VirtAddr::from(start).floor();
-    loop {
-        match pt.find_pte(vpn) {
-            Some(pte) => {
-                if !pte.is_valid() {
-                    println!("unmap_many_inner: pte invalid for vpn {:x}", vpn.0);
-                    return -1
-                }
-            }
-            None => {
-                println!("unmap_many_inner: pte not found for vpn {:x}", vpn.0);
-                return -1
-            }
-        }
-        pt.unmap(vpn);
-        if vpn.0 == VirtAddr::from(start + len - 1).floor().0 { break }
-        vpn.step();
-    }
-    0
-}
-
-/// According to the test cases, we should handle page-unaligned start/len like this:
-/// After mmap, all contents in newly mapped page(s) must be 0
-/// mmap MUST NOT have start misaligned
-/// cannot mmap a page without any priority / with priority >8
-/// mmap(0x1000, 0x1001) -> [0x1000, 0x3000) mapped
-/// mmap(0x1000, 0x2000) but [0x2000, 0x3000) already mapped -> [0x1000, 0x2000) will not be mapped
-pub fn map_many_inner(start: usize, len: usize, prot: usize) -> isize {
-    if !is_prot_valid(prot) {
-        println!("map_many_inner: prot {} invalid", prot);
-        return -1;
-    }
-    let token = current_user_token();
-    let pt: PageTable = PageTable::from_token(token);
-    if start & (PAGE_SIZE - 1) != 0 {
-        println!("map_many_inner: start address 0x{:x} misaligned", start);
-        return -1;
-    }
-    let mut vpn = VirtAddr::from(start).floor();
-    loop {
-        match pt.translate(vpn) {
-            Some(ppn) => {
-                if ppn.is_valid() {
-                    println!("map_many_inner: already found pte for vpn 0x{:x}: 0x{:x}",
-                             vpn.0, ppn.ppn().0);
-                    return -1;
-                }
-            }
-            _ => ()
-        }
-        if vpn.0 == VirtAddr::from(start + len - 1).floor().0 { break }
-        vpn.step();
-    }
-    println!("prot: {}, start = 0x{:x}, len = 0x{:x}", prot, start, len);
-
-    add_user_map_area(start, start + len, prot as u8);
-
-    0
 }

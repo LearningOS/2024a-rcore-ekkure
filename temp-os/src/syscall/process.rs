@@ -1,15 +1,14 @@
 //! Process management syscalls
 
-use core::mem::size_of;
+use core::ptr::addr_of;
 use crate::{
     config::MAX_SYSCALL_NUM,
     task::{
         change_program_brk, exit_current_and_run_next, suspend_current_and_run_next, TaskStatus,
     },
 };
-use crate::mm::{mmap_many, munmap_many};
-use crate::syscall::fs::copy_to_current_user;
-use crate::task::{get_start_time, get_syscall_counter, GET_FOR_CURRENT_TASK};
+use crate::mm::translated_byte_buffer;
+use crate::task::{current_user_token, get_syscall_times, get_task_time, mmap_cur_task, munmap_cur_task};
 use crate::timer::get_time_us;
 
 #[repr(C)]
@@ -29,7 +28,15 @@ pub struct TaskInfo {
     /// Total running time of task
     time: usize,
 }
-
+impl TaskInfo {
+    fn get_task_info()->Self{
+        TaskInfo{
+            status: TaskStatus::Running,
+            syscall_times: get_syscall_times(),
+            time: get_task_time(),
+        }
+    }
+}
 /// task exits and submit an exit code
 pub fn sys_exit(_exit_code: i32) -> ! {
     trace!("kernel: sys_exit");
@@ -47,50 +54,58 @@ pub fn sys_yield() -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
+    let buffers =translated_byte_buffer(current_user_token(), ts as *const u8, core::mem::size_of::<TimeVal>());
     let us = get_time_us();
-    let time = TimeVal {
-        sec: us / 1_000_000,
-        usec: us % 1_000_000,
-    };
-    copy_to_current_user(_ts, &time as *const TimeVal, size_of::<TimeVal>());
+    let tv= TimeVal {
+            sec: us / 1_000_000,
+            usec: us % 1_000_000,
+        };
+    let mut tv_ptr =addr_of!(tv) as *const u8;
+    for buffer in buffers{
+        unsafe {
+            tv_ptr.copy_to(buffer.as_mut_ptr(),buffer.len());
+            tv_ptr=tv_ptr.offset(buffer.len() as isize);
+        }
+    }
     0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
-pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
+pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
     trace!("kernel: sys_task_info");
-
-    if let Ok(counter) = get_syscall_counter(GET_FOR_CURRENT_TASK) {
-        let info: TaskInfo = TaskInfo {
-            status: TaskStatus::Running,
-            syscall_times: counter,
-            time: get_start_time(GET_FOR_CURRENT_TASK).unwrap_or_else(|| usize::MAX),
-        };
-        assert_eq!(copy_to_current_user(_ti, &info, size_of::<TaskInfo>()),
-                   size_of::<TaskInfo>() as isize);
-    } else {
-        return -1;
+    let buffers =translated_byte_buffer(current_user_token(), ti as *const u8, core::mem::size_of::<TaskInfo>());
+    let ti_temp=TaskInfo::get_task_info();
+    let mut ti_temp_ptr=addr_of!(ti_temp) as *const u8;
+    for buffer in buffers {
+        unsafe {
+            ti_temp_ptr.copy_to(buffer.as_mut_ptr(),buffer.len());
+            ti_temp_ptr=ti_temp_ptr.offset(buffer.len() as isize);
+        }
     }
-
     0
 }
 
 // YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _prot: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!("kernel: sys_mmap");
-    mmap_many(_start, _len, _prot)
+    match mmap_cur_task(start,len,port) {
+        Ok(_) => 0,
+        Err(e) => {error!("{e}");-1}
+    }
 }
 
 // YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!("kernel: sys_munmap");
-    munmap_many(_start, _len)
+    match munmap_cur_task(start,len) {
+        Ok(_) => 0,
+        Err(e) => {error!("{e}");-1}
+    }
 }
-
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
     trace!("kernel: sys_sbrk");

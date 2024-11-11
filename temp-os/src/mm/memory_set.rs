@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use lazy_static::*;
 use riscv::register::satp;
+use crate::mm::address::SimpleRange;
 
 extern "C" {
     fn stext();
@@ -262,6 +263,60 @@ impl MemorySet {
             false
         }
     }
+
+    /// alloc a part of  new virtual memory
+    pub fn alloc_vm(&mut self,start: usize, len: usize, port: usize)->Result<(),&'static str>{
+        let start_va=VirtAddr::from(start);
+        if !start_va.aligned(){
+            return Err("don't aligned");
+        }
+        if port & !0x7 != 0 {
+            return Err("must all be 0");
+        }
+        if port & 0x7 == 0 {
+            return Err("no mean");
+        }
+        let end_va=VirtAddr::from(start+len);
+        let start_vpn =VirtPageNum::from(start_va);
+        let end_vpn=VirtAddr::ceil(&end_va);
+        let flags=PTEFlags::from(port);
+        let iter=SimpleRange::new(start_vpn,end_vpn);
+        for vpn in iter {
+            if let Some(pte)=self.page_table.translate(vpn){
+                if pte.is_valid(){
+                    return Err("this page not be freed");
+                }
+            }
+            if let Some(ppn)=frame_alloc(){
+                self.page_table.map(vpn,ppn.ppn,flags);
+            }else {
+                return Err("can't alloc frame")
+            }
+        }
+        Ok(())
+    }
+    /// free a part of virtual memory
+    pub fn free_vm(&mut self, start:usize, len:usize) ->Result<(),&'static str>{
+        let start_va=VirtAddr::from(start);
+        if !start_va.aligned(){
+            return Err("don't aligned");
+        }
+        let end_va=VirtAddr::from(start+len);
+        let start_vpn=VirtPageNum::from(start_va);
+        let end_vpn=VirtAddr::ceil(&end_va);
+        let iter=SimpleRange::new(start_vpn,end_vpn);
+        for vpn in iter {
+            if let Some(pte)=self.page_table.translate(vpn){
+                if !pte.is_valid(){
+                    return Err("this page not be alloc")
+                }
+            }else {
+                return Err("can't get the page table entry")
+            }
+            self.page_table.unmap(start_vpn);
+        }
+        Ok(())
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -272,7 +327,6 @@ pub struct MapArea {
 }
 
 impl MapArea {
-    /// create a new map area
     pub fn new(
         start_va: VirtAddr,
         end_va: VirtAddr,
@@ -288,8 +342,6 @@ impl MapArea {
             map_perm,
         }
     }
-
-    /// map one of the pages
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
         match self.map_type {
@@ -305,8 +357,6 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
-
-    /// unmap one of the pages
     #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if self.map_type == MapType::Framed {
@@ -314,23 +364,17 @@ impl MapArea {
         }
         page_table.unmap(vpn);
     }
-
-    /// map all pages
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
     }
-
-    /// unmap all pages
     #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
         }
     }
-
-    /// shrink the map size
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
@@ -338,8 +382,6 @@ impl MapArea {
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
-
-    /// append the map size
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
