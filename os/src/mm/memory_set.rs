@@ -51,6 +51,43 @@ impl MemorySet {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
+
+
+    ///...
+    pub fn check_conflict(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let s0 = start_va.floor();
+        let e0 = end_va.ceil();
+        for area in self.areas.iter() {
+            let s = area.vpn_range.get_start();
+            let e  = area.vpn_range.get_end();
+            if !(s0 >= e || e0 <= s) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// ...
+    pub fn remove_area(&mut self,start_va: VirtAddr, end_va: VirtAddr) -> isize{ 
+        let s0 = start_va.floor();
+        let e0 = end_va.ceil();
+        let mut area_idx = None;
+        for (idx, area) in self.areas.iter().enumerate() {
+            let s = area.vpn_range.get_start();
+            let e  = area.vpn_range.get_end();
+            if s == s0 && e == e0 {
+                area_idx = Some(idx);
+            }
+        }
+        if let Some(idx) = area_idx {
+            let mut area = self.areas.remove(idx);
+            area.unmap(&mut self.page_table);
+            0
+        } else {
+            -1
+        }
+    }
+
     /// Assume that no conflicts.
     pub fn insert_framed_area(
         &mut self,
@@ -272,7 +309,6 @@ pub struct MapArea {
 }
 
 impl MapArea {
-    /// create a new map area
     pub fn new(
         start_va: VirtAddr,
         end_va: VirtAddr,
@@ -288,8 +324,6 @@ impl MapArea {
             map_perm,
         }
     }
-
-    /// map one of the pages
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
         match self.map_type {
@@ -305,8 +339,6 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
-
-    /// unmap one of the pages
     #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if self.map_type == MapType::Framed {
@@ -314,23 +346,17 @@ impl MapArea {
         }
         page_table.unmap(vpn);
     }
-
-    /// map all pages
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
     }
-
-    /// unmap all pages
     #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
         }
     }
-
-    /// shrink the map size
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
@@ -338,8 +364,6 @@ impl MapArea {
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
-
-    /// append the map size
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {

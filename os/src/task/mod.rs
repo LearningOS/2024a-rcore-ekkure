@@ -16,16 +16,15 @@ mod task;
 
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
+pub use task::TaskStat;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
-use crate::config::MAX_SYSCALL_NUM;
-use crate::mm::{MapPermission, VirtAddr};
-use crate::timer::get_time_ms;
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -73,9 +72,6 @@ lazy_static! {
     };
 }
 
-/// This constant is used for getting something more conveniently
-pub const GET_FOR_CURRENT_TASK: usize = usize::MAX;
-
 impl TaskManager {
     /// Run the first task in task list.
     ///
@@ -85,6 +81,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        next_task.task_stat.start_time = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -93,42 +90,6 @@ impl TaskManager {
             __switch(&mut _unused as *mut _, next_task_cx_ptr);
         }
         panic!("unreachable in run_first_task!");
-    }
-
-    /// Increase the syscall counter by 1
-    fn increase_syscall_counter(&self, syscall_id: usize) {
-        let current: usize = self.inner.exclusive_access().current_task;
-        let mut inner = self.inner.exclusive_access();
-        inner.tasks[current].syscall_counter[syscall_id] += 1;
-    }
-
-    /// Get the copy of syscall counter, if received usize::MAX, return the counter of current task
-    fn get_syscall_counter(&self, task: usize) -> Result<[u32; MAX_SYSCALL_NUM], &str> {
-        match task {
-            usize::MAX => {
-                let current: usize = self.inner.exclusive_access().current_task;
-                Ok(self.inner.exclusive_access().tasks[current].syscall_counter.clone())
-            }
-            x if x < get_num_app() =>
-                Ok(self.inner.exclusive_access().tasks[x].syscall_counter.clone()),
-            _ => Err("Invalid task id")
-        }
-    }
-
-    // Get the last start time of a task, if received usize::MAX, return the time of current task
-    fn get_start_time(&self, task: usize) -> Option<usize> {
-        let target: usize = if task == GET_FOR_CURRENT_TASK {
-            self.inner.exclusive_access().current_task
-        } else {
-            task
-        };
-        let inner = self.inner.exclusive_access();
-        let now = get_time_ms();
-        match inner.tasks[target].start_time {
-            usize::MAX => None,
-            x if x <= now => Some(now - x),
-            _ => panic!("Corrupted start timestamp")
-        }
     }
 
     /// Change the status of current `Running` task into `Ready`.
@@ -162,6 +123,19 @@ impl TaskManager {
         inner.tasks[inner.current_task].get_user_token()
     }
 
+    /// ...
+    pub fn get_current_stat(&self) -> *mut TaskStat {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        &mut inner.tasks[cur].task_stat as *mut TaskStat
+    }
+
+    /// ...
+    pub fn get_current_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].task_status
+    }
+
     /// Get the current 'Running' task's trap contexts.
     fn get_current_trap_cx(&self) -> &'static mut TrapContext {
         let inner = self.inner.exclusive_access();
@@ -182,12 +156,12 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].task_stat.start_time == 0 {
+                inner.tasks[next].task_stat.start_time = get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
-            if inner.tasks[next].start_time == usize::MAX {
-                inner.tasks[next].start_time = get_time_ms();
-            }
             drop(inner);
             // before this, we should drop local variables that must be dropped manually
             unsafe {
@@ -199,12 +173,22 @@ impl TaskManager {
         }
     }
 
-    fn add_user_map_area(&self, start: VirtAddr, end: VirtAddr, perm: u8) {
+
+    /// ...
+    fn sys_mmap(&self, _start: usize, _len: usize, _port: usize) -> isize {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.tasks[current].memory_set.insert_framed_area(start, end,
-                               MapPermission::from_bits((perm << 1) | (1 << 4)).unwrap());
+        inner.tasks[current].sys_mmap(_start, _len, _port)
     }
+
+
+    /// ...
+    fn sys_unmap(&self, _start: usize, _len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].sys_unmap(_start, _len)
+    }
+
 }
 
 /// Run the first task in task list.
@@ -255,25 +239,13 @@ pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
 
-/// Increase the syscall usage counter of current task
-#[allow(unused)]
-pub fn increase_syscall_counter(syscall_id: usize) {
-    TASK_MANAGER.increase_syscall_counter(syscall_id);
+
+///...
+pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+    TASK_MANAGER.sys_mmap(_start, _len, _port)
 }
 
-/// Get the syscall usage counter of a task (MAX_SYSCALL_NUM for current task)
-#[allow(unused)]
-pub fn get_syscall_counter(task: usize) -> Result<[u32; MAX_SYSCALL_NUM], &'static str> {
-    TASK_MANAGER.get_syscall_counter(task)
-}
-
-/// Get the last start time of a task (MAX_SYSCALL_NUM for current task)
-#[allow(unused)]
-pub fn get_start_time(task: usize) -> Option<usize> {
-    TASK_MANAGER.get_start_time(task)
-}
-
-/// add a user map area
-pub fn add_user_map_area(start: usize, end: usize, perm: u8) {
-    TASK_MANAGER.add_user_map_area(VirtAddr::from(start), VirtAddr::from(end), perm)
+///...
+pub fn sys_unmap(_start: usize, _len: usize) -> isize {
+    TASK_MANAGER.sys_unmap(_start, _len)
 }
